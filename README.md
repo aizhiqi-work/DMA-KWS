@@ -48,6 +48,20 @@ This repository provides:
 ### Datasets
 
 * **GigaPhrase-1000**: [https://github.com/aizhiqi-work/GigaPhrase-1000](https://github.com/aizhiqi-work/GigaPhrase-1000)
-* **LibriPhrase**: used for evaluation
+* **LibriPhrase**: 
+
+LibriPhrase-100
+    Anchors 数量：12k
+    HuggingFace：👉 ZhiqiAi/LibriPhrase-100
+
+LibriPhrase-460
+    Anchors 数量：78k
+    HuggingFace：👉 ZhiqiAi/LibriPhrase-460
+
+GigaPhrase-1000
+    Anchors 数量：155k
+    包含：LibriPhrase-460 (LP-460)
+    HuggingFace：👉 ZhiqiAi/GigaPhrase-1000
+
 
 ---
