@@ -137,6 +137,25 @@ class TrainingNoiseAugmenter:
         rng: random.Random,
     ) -> tuple[torch.Tensor, float]:
         """Return ``(mixed_waveform, sampled_snr_db)`` at the clean sample rate."""
+        mixed, snr_db, _source = self.mix_with_source(waveform, sample_rate, rng=rng)
+        return mixed, snr_db
+
+    def mix_with_source(
+        self,
+        waveform: torch.Tensor,
+        sample_rate: int,
+        *,
+        rng: random.Random,
+        noise_path: str | Path | None = None,
+        snr_db: float | None = None,
+    ) -> tuple[torch.Tensor, float, Path]:
+        """``mix`` plus the interference recording actually drawn.
+
+        Offline callers pass an already drawn ``noise_path`` and ``snr_db`` so the
+        recipe written to disk is exactly what was rendered. When they are omitted
+        the source and level are drawn from ``rng`` in the online order (source and
+        crop draws inside the retry loop, then the level draw).
+        """
         if int(sample_rate) <= 0:
             raise ValueError("Stage II clean sample rate must be positive")
         waveform = self._as_mono(waveform, source=Path("<clean waveform>"))
@@ -148,13 +167,17 @@ class TrainingNoiseAugmenter:
             )
 
         noise = None
-        noise_path = None
+        drawn_path = None
         noise_power = None
         # A long recording can be valid overall while one randomly selected crop
         # is silent. Retry a bounded number of source/crop draws so an occasional
         # quiet region does not kill a persistent DataLoader worker.
         for _attempt in range(8):
-            candidate_path = rng.choice(self.noise_paths)
+            candidate_path = (
+                Path(noise_path)
+                if noise_path is not None
+                else rng.choice(self.noise_paths)
+            )
             candidate, noise_sample_rate = _load_audio(
                 candidate_path,
                 rng=rng,
@@ -176,30 +199,36 @@ class TrainingNoiseAugmenter:
             candidate_power = candidate.square().mean()
             if torch.isfinite(candidate_power) and float(candidate_power) > tiny:
                 noise = candidate
-                noise_path = candidate_path
+                drawn_path = candidate_path
                 noise_power = candidate_power
                 break
-        if noise is None or noise_path is None or noise_power is None:
+        if noise is None or drawn_path is None or noise_power is None:
             raise ValueError(
                 "Could not draw a non-silent Stage II noise crop after 8 attempts"
             )
 
-        snr_db = rng.uniform(self.snr_db_min, self.snr_db_max)
+        sampled_snr_db = (
+            rng.uniform(self.snr_db_min, self.snr_db_max)
+            if snr_db is None
+            else float(snr_db)
+        )
         try:
-            snr_linear = 10.0 ** (snr_db / 10.0)
+            snr_linear = 10.0 ** (sampled_snr_db / 10.0)
         except OverflowError as exc:
             raise ValueError(
-                f"Stage II noise SNR is outside numeric range: {snr_db}"
+                f"Stage II noise SNR is outside numeric range: {sampled_snr_db}"
             ) from exc
         if not math.isfinite(snr_linear) or snr_linear <= 0.0:
-            raise ValueError(f"Stage II noise SNR is outside numeric range: {snr_db}")
+            raise ValueError(
+                f"Stage II noise SNR is outside numeric range: {sampled_snr_db}"
+            )
         scale = torch.sqrt(signal_power / (noise_power * snr_linear))
         mixed = waveform + noise * scale
         if not torch.isfinite(mixed).all():
             raise ValueError(
-                f"Stage II noise augmentation produced non-finite samples: {noise_path}"
+                f"Stage II noise augmentation produced non-finite samples: {drawn_path}"
             )
-        return mixed.contiguous(), snr_db
+        return mixed.contiguous(), float(sampled_snr_db), drawn_path
 
     def extract(self, wav_path: str, *, rng: random.Random) -> torch.Tensor:
         """Load one clean clip, mix noise, and compute configured Stage-II fbank."""

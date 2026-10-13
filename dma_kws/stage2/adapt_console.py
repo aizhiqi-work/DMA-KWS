@@ -51,9 +51,10 @@ def prep_plan_rows(
     eval_fraction: float,
     eval_seed: int,
     skip_existing: bool,
+    augmentation: str = "",
 ) -> list[tuple[str, str]]:
     """Settings table for keyword adaptation data preparation."""
-    return [
+    rows = [
         ("keyword", keyword),
         ("slug", slug),
         ("data_root", str(data_root)),
@@ -62,6 +63,9 @@ def prep_plan_rows(
         ("eval_seed", str(eval_seed)),
         ("skip_existing_fbank", str(skip_existing)),
     ]
+    if augmentation:
+        rows.append(("musan_mix", augmentation))
+    return rows
 
 
 def prep_phase_table(stats: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
@@ -87,12 +91,33 @@ def prep_stats_rows(stats: dict[str, Any]) -> list[tuple[str, str]]:
     """Aggregate counters from ``prepare_keyword_adaptation`` stats."""
     phases = stats.get("phases") or {}
     total = sum(int(phase["total"]) for phase in phases.values())
-    return [
+    rows = [
         ("samples", _count(total)),
         ("unique_texts", _count(stats.get("unique_texts", 0))),
         ("fbank_written", _count(stats.get("fbank_written", 0))),
         ("fbank_skipped", _count(stats.get("fbank_skipped", 0))),
     ]
+    augmentation = stats.get("augmentation") or {}
+    if augmentation:
+        rows.extend(
+            [
+                ("aug_status", str(augmentation.get("status", ""))),
+                ("aug_generation", str(augmentation.get("generation", ""))),
+                ("aug_planned", _count(augmentation.get("planned", 0))),
+                ("aug_written", _count(augmentation.get("written", 0))),
+                ("aug_skipped", _count(augmentation.get("skipped", 0))),
+                ("aug_frames", _count(augmentation.get("frames", 0))),
+                (
+                    "aug_storage",
+                    f"{int(augmentation.get('bytes', 0)) / (1024 * 1024):.1f} MiB",
+                ),
+            ]
+        )
+        by_category = augmentation.get("by_category") or {}
+        for kind in ("noise", "music", "speech"):
+            if kind in by_category:
+                rows.append((f"aug_{kind}", _count(by_category[kind])))
+    return rows
 
 
 @contextmanager
@@ -101,6 +126,7 @@ def prep_progress(reporter: Stage2PrepReporter) -> Iterator[Callable[[str, int],
     with reporter.tasks() as tasks:
         g2p_task = tasks.add("Validate G2P (unique texts)", total=None)
         fbank_task = tasks.add("Compute fbank", total=None)
+        augment_task = tasks.add("Mix MUSAN variants", total=None)
 
         def on_progress(stage: str, value: int) -> None:
             if stage == "scan":
@@ -113,6 +139,10 @@ def prep_progress(reporter: Stage2PrepReporter) -> Iterator[Callable[[str, int],
                 tasks.set_total(fbank_task, value)
             elif stage == "fbank":
                 tasks.advance(fbank_task, value)
+            elif stage == "augment_total":
+                tasks.set_total(augment_task, value)
+            elif stage == "augment":
+                tasks.advance(augment_task, value)
 
         yield on_progress
 
@@ -140,6 +170,10 @@ def prepare_with_console(
     from dma_kws.config import fbank_kwargs, get_fbank_config
     from dma_kws.stage2.adapt_paths import adapt_data_root, slugify
     from dma_kws.stage2.prepare_adapt import prepare_keyword_adaptation
+    from dma_kws.stage2.prepare_adapt_noise import (
+        describe_offline_musan_request,
+        resolve_adapt_noise_augmentation,
+    )
 
     keyword = str(adapt.get("keyword", "")).strip()
     if not keyword:
@@ -153,6 +187,9 @@ def prepare_with_console(
     eval_seed = int(adapt.get("eval_seed", (config.get("training") or {}).get("seed", 2025)))
     skip_existing = not bool(prep.get("no_skip_existing", False))
 
+    fbank_params = fbank_kwargs(get_fbank_config(config))
+    noise_augmentation = resolve_adapt_noise_augmentation(adapt, prep)
+
     reporter = adapt_reporter(config, prep)
     reporter.section(f"Prepare keyword adaptation data · {keyword}")
     reporter.print_plan(
@@ -164,6 +201,7 @@ def prepare_with_console(
             eval_fraction=eval_fraction,
             eval_seed=eval_seed,
             skip_existing=skip_existing,
+            augmentation=describe_offline_musan_request(noise_augmentation),
         ),
         title="Preparation Plan",
     )
@@ -172,7 +210,7 @@ def prepare_with_console(
         stats = prepare_keyword_adaptation(
             keyword=keyword,
             data_root=data_root,
-            fbank_params=fbank_kwargs(get_fbank_config(config)),
+            fbank_params=fbank_params,
             eval_fraction=eval_fraction,
             eval_seed=eval_seed,
             manifest_csv=manifest_path,
@@ -184,6 +222,7 @@ def prepare_with_console(
                 or adapt.get("train_phases") == ["joint"]
                 or adapt.get("train_phases") == ("joint",)
             ),
+            noise_augmentation=noise_augmentation,
         )
 
     reporter.print_table(*prep_phase_table(stats), title="Phase Splits")

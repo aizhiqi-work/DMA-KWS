@@ -34,7 +34,8 @@ everywhere; zh-en > GS-base > GS-finetune), throughput / co-location measurement
 - [README](https://github.com/ty4045681/DMA-KWS#readme) — pipeline overview, configs,
   training and evaluation commands.
 - `docs/` in the repository — paper reproduction, Stage-II multi-source background,
-  QbyT sink-attention diagnostics.
+  QbyT sink-attention diagnostics, offline MUSAN mixing for keyword adaptation
+  (`docs/adapt-offline-musan-mix.md`).
 
 ---
 

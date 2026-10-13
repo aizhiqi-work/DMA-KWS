@@ -102,3 +102,24 @@ adapt:
     plot_max_fpr: null
     storage: ""
     study_name: ""
+
+  # Offline MUSAN mixing for TRAIN positives. This is the offline counterpart of
+  # stage2.noise_augmentation, which adapt rejects because manifests carry
+  # precomputed fbank instead of waveforms. Only fbank features are materialized;
+  # the trainer, dataset and joint validation stay untouched.
+  # See docs/superpowers/plans/2026-10-13-adapt-offline-musan-mix.md.
+  noise_augmentation:
+    enabled: false
+    generation: g1            # recipe/feature namespace; bump when the config changes
+    seed: 2025
+    musan_split_dir: ""       # holds train_background.list, eval_musan.list, split.json
+    train_list: ""            # default: <musan_split_dir>/train_background.list
+    eval_list: ""             # default: <musan_split_dir>/eval_musan.list
+    variants_per_sample: 1    # copies per enabled category per train positive
+    keep_original: true
+    dry_run: false            # plan + report only, materialize nothing
+    phases: []                # [] = every prepared phase; joint runs should use [real]
+    categories:
+      noise:  {enabled: false, snr_db_min: 0.0,        snr_db_max: 15.0}
+      music:  {enabled: false, snr_db_min: 5.0,        snr_db_max: 20.0}
+      speech: {enabled: false, relative_db_min: -15.0, relative_db_max: -5.0}

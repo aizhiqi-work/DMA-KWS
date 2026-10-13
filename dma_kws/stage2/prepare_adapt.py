@@ -6,7 +6,7 @@ import csv
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 import numpy as np
 
@@ -14,6 +14,9 @@ from dma_kws.g2p import make_g2p, text_to_phonemes
 from dma_kws.stage2.adapt_paths import directory_name_to_text, neg_slug_to_text, slugify, wav_to_fbank_mirror
 from dma_kws.stage2.features import waveform_to_fbank
 from dma_kws.tokenizer import unsupported_phones
+
+if TYPE_CHECKING:
+    from dma_kws.stage2.prepare_adapt_noise import AugmentationRequest
 
 
 @dataclass
@@ -369,15 +372,21 @@ def prepare_keyword_adaptation(
     skip_existing: bool = True,
     on_progress: Callable[[str, int], None] | None = None,
     joint: bool = False,
+    noise_augmentation: "AugmentationRequest | None" = None,
 ) -> dict[str, Any]:
     """Prepare fbank features and manifests for one keyword slug tree.
 
     ``on_progress(stage, value)`` reports work as it happens; stages are
-    ``scan``, ``g2p_total``/``g2p`` and ``fbank_total``/``fbank`` (``*_total``
-    carries a count, the others an increment).
+    ``scan``, ``g2p_total``/``g2p``, ``fbank_total``/``fbank`` and, when offline
+    mixing is enabled, ``augment_total``/``augment``/``augment_skipped``
+    (``*_total`` carries a count, the others an increment).
 
     ``joint`` requires both source phases, keeps real speakers and original
     recording groups within one split, and preserves every explicit assignment.
+
+    ``noise_augmentation`` is an already validated
+    ``prepare_adapt_noise.AugmentationRequest``; ``None`` keeps today's behavior.
+    Variants are derived deterministically and only train positives are expanded.
     """
 
     def report(stage: str, value: int) -> None:
@@ -446,6 +455,19 @@ def prepare_keyword_adaptation(
                 )
         phase_splits[phase] = (train_rows, eval_rows)
 
+    base_phase_splits = phase_splits
+    mix_plan = None
+    if noise_augmentation is not None:
+        from dma_kws.stage2.prepare_adapt_noise import plan_offline_musan_variants
+
+        mix_plan = plan_offline_musan_variants(
+            base_phase_splits,
+            keyword=keyword,
+            data_root=data_root,
+            request=noise_augmentation,
+            fbank_params=fbank_params,
+        )
+
     unique_texts = sorted({sample.text for sample in all_samples})
     report("g2p_total", len(unique_texts))
     g2p = make_g2p()
@@ -453,7 +475,11 @@ def prepare_keyword_adaptation(
         validate_g2p(text, g2p)
         report("g2p", 1)
 
-    report("fbank_total", len(all_samples))
+    materialize_variants = mix_plan is not None and not noise_augmentation.dry_run
+    report(
+        "fbank_total",
+        len(all_samples) + (len(mix_plan.variants) if materialize_variants else 0),
+    )
     written = 0
     skipped = 0
     for sample in all_samples:
@@ -471,6 +497,24 @@ def prepare_keyword_adaptation(
         else:
             skipped += 1
         report("fbank", 1)
+
+    mix_stats = None
+    if mix_plan is not None:
+        from dma_kws.stage2.prepare_adapt_noise import (
+            materialize_offline_musan_variants,
+            preview_offline_musan_variants,
+        )
+
+        if noise_augmentation.dry_run:
+            mix_stats = preview_offline_musan_variants(mix_plan)
+        else:
+            mix_stats = materialize_offline_musan_variants(
+                mix_plan,
+                fbank_params=fbank_params,
+                skip_existing=skip_existing,
+                on_progress=on_progress,
+            )
+            phase_splits = mix_plan.phase_splits
 
     manifest_dir = data_root / "manifests"
     stats: dict[str, Any] = {
@@ -493,10 +537,15 @@ def prepare_keyword_adaptation(
             "train_negative": sum(1 for row in train_rows if row.label == 0),
             "eval_positive": sum(1 for row in eval_rows if row.label == 1),
             "eval_negative": sum(1 for row in eval_rows if row.label == 0),
+            "train_augmented": sum(
+                1 for row in train_rows if row.metadata.get("aug_recipe_id")
+            ),
             "train_manifest": str(train_path),
             "eval_manifest": str(eval_path),
         }
 
+    if mix_stats is not None:
+        stats["augmentation"] = mix_stats.to_stats_dict()
     stats["fbank_written"] = written
     stats["fbank_skipped"] = skipped
     return stats
